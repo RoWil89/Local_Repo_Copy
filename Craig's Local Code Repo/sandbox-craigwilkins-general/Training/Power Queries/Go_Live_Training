@@ -1,0 +1,52 @@
+////  Author: Kryssy Acock
+////  Date: 04.10.2019'
+////  Description: This tables combines New Energy and AFMS data. It brings in the date function to calculate the CAB Switches metrics.
+////  Query Name: [Merged] New Energy and AFMS [A]
+
+let
+    Source = Table.NestedJoin(#"[Appended] New Energy Total [A]", {"Contract ID"}, #"[Merged] AFMS Leaked [A]", {"Contract ID"}, "[Merged] AFMS Valid Exceptions [A]", JoinKind.LeftOuter),
+    #"Expanded [Appended] New Energy and AFMS Valid Exceptions [A]" = Table.ExpandTableColumn(Source, "[Merged] AFMS Valid Exceptions [A]", {"Earliest AFMS Valid Exception Date", "Status Name"}, {"Earliest AFMS Valid Exception Date", "Status Name"}),
+    ///Created a columns to recognise Valid Exceptions
+	
+	#"Merged with [Grouped] Earliest Supply Start Date [A]" = Table.NestedJoin(#"Expanded [Appended] New Energy and AFMS Valid Exceptions [A]", {"Contract ID"}, #"[Grouped] Earliest Supply Start Date [A]", {"Contract ID"}, "[Grouped] Earliest Supply Start Date [A]", JoinKind.LeftOuter),
+    #"Expanded [Grouped] Earliest Supply Start Date [A]" = Table.ExpandTableColumn(#"Merged with [Grouped] Earliest Supply Start Date [A]", "[Grouped] Earliest Supply Start Date [A]", {"Earliest Supply Start Date"}, {"Earliest Supply Start Date"}),
+    ///Merged in Earliest Supply Start Date for the CAB metric and to see how many valid exceptions have since goine live.
+    
+	#"Added Column Lost MPxN Flag" = Table.AddColumn(#"Expanded [Grouped] Earliest Supply Start Date [A]", "Lost MPxN Flag", each if [Earliest Supply Start Date] = null then 1 else 0),
+			///Added column to show all sales which have not made it into AFMS. If it's not in AFMS then the registration request didn't happen
+	
+	#"Added Column Quality: No MPxN" = Table.AddColumn(#"Added Column Lost MPxN Flag", "Quality: No MPxN", each if [#"Supply Number (MPxN)"] = null then 1 else if [#"Supply Number (MPxN)"] = "" then 1 else if [#"Supply Number (MPxN)"] = "." then 1 else if [#"Supply Number (MPxN)"] = "," then 1 else 0),
+			///Added a quality column to show sales which do not have an MPxN attached
+	
+	#"Added Column Quality: No Account Number" = Table.AddColumn(#"Added Column Quality: No MPxN", "Quality: No Account Number", each if [Account Number] = null then 1 else if [Account Number] = "" then 1 else 0),
+			///Added a quality column to show sales which don't have an Account Number attached
+	
+	#"Added Column Go Live End Date" = Table.AddColumn(#"Added Column Quality: No Account Number", "Go Live End Date", each if [Earliest Supply Start Date] = null then Date.From(DateTime.LocalNow()) else [Earliest Supply Start Date]),
+			///Added a CAB End date, which is today's date if the MPxN hasn't got a SSD
+			
+	#"Added Column Lost Reason" = Table.AddColumn(#"Added Column Go Live End Date", "Lost Reason", each if [Earliest Supply Start Date] <> null then "Live" else if [Objection] = "Objection" then "Objected" else if [Status Name] = "Objected" then "Objected" else if [Status Name] = "Rejected" then "Rejected" else if [Status Name] = "Cancelled" then "Cancelled" else if Text.Contains([Contract Name], "Cancelled") then "Cancelled" else if Text.Contains([Contract Name], "Rejection") then "Rejected" else if Text.Contains([Contract Name], "Objection") then "Objected" else "Not In AFMS"),
+    ///Added Lost Reason to show the MPxNs current Status
+
+	#"Added Column Leaked Reason" = Table.AddColumn(#"Added Column Lost Reason", "Leaked Reason", each if [Earliest Supply Start Date] <> null then "Live" else if [Objection] = "Objection" then "Objected" else if [Status Name] = "Objected" then "Objected" else if [Status Name] = "Rejected" then "Rejected" else if [Status Name] = "Cancelled" then "Cancelled" else if Text.Contains([Contract Name], "Cancelled") then "Cancelled" else if Text.Contains([Contract Name], "Rejection") then "Rejected" else if Text.Contains([Contract Name], "Objection") then "Objected" else "Not In AFMS"),
+    ///Added Leaked Reason to show if an MPxN has ever leaked
+	
+	#"Removed Other Columns" = Table.SelectColumns(#"Added Column Leaked Reason",{"Opportunity ID", "Opportunity Close Date", "Opportunity Processing Team", "Opportunity CAB Date", "Contract ID", "Campaign Code", "Campaign Business Name", "Campaign Channel", "Supply Number (MPxN)", "Opportunity Owner Name", "Campaign Channel Grouped", "MPxNs", "NVM Dialler Call Count Grouped", "Opportunity Channel Converted", "Payment Method", "Opportunity Channel Created", "Last Modified By", "Work Item Status", "Work Item Date Closed", "Leaked Work Item", "Lost MPxN Flag", "Quality: No MPxN", "Quality: No Account Number", "Go Live End Date", "Lost Reason", "Leaked Reason"}),
+    #"Merged with [UH-Gendb-01] AFMS Loss Confirmed [A]" = Table.NestedJoin(#"Removed Other Columns", {"Supply Number (MPxN)"}, #"[UH-Gendb-01] AFMS Loss Confirmed  [A]", {"MPxN"}, "[UH-Gendb-01] AFMS Loss Confirmed  [A]", JoinKind.LeftOuter),
+    #"Expanded [UH-Gendb-01] AFMS Loss Confirmed  [A]" = Table.ExpandTableColumn(#"Merged with [UH-Gendb-01] AFMS Loss Confirmed [A]", "[UH-Gendb-01] AFMS Loss Confirmed  [A]", {"Status Name"}, {"Status Name"}),
+			///Added Loss confirmed Data
+	
+	#"Invoked Custom Function CAB Date Difference" = Table.AddColumn(#"Expanded [UH-Gendb-01] AFMS Loss Confirmed  [A]", "CAB Working Days", each #"fn Network Days"([Opportunity CAB Date], [Go Live End Date], #"[LH-Gendb-01] Date Table [A]"[Holiday Date], null)),
+    #"Invoked Custom Function" = Table.AddColumn(#"Invoked Custom Function CAB Date Difference", "Go Live Working Days", each #"fn Network Days"([Opportunity Close Date], [Go Live End Date], #"[LH-Gendb-01] Date Table [A]"[Holiday Date], null)),
+			///Added CAB and Go Live Working days functions 
+			
+	#"Added Column Leaked Category" = Table.AddColumn(#"Invoked Custom Function", "Leaked Category", each if [Leaked Reason] = "Rejected" then "Avoidable" else if [Leaked Reason] = "Objected" then "Unavoidable" else if [Leaked Reason] = "Not In AFMS" then "Avoidable" else if [Leaked Reason] = "Cancelled" then "Unavoidable" else null),
+			///Added column for 'Leaked Category' for avoidable or unavoidable leakage
+	
+	#"Added Column CAB Time Taken (Grouped)" = Table.AddColumn(#"Added Column Leaked Category", "CAB Time Taken Grouped", each if [CAB Working Days] > 15 then "Greater than 15" else "Less than 15"),
+    #"Added Column CAB Status" = Table.AddColumn(#"Added Column CAB Time Taken (Grouped)", "CAB Status", each (if ([Lost Reason] = "Objected" and [#"CAB Time Taken Grouped"] = "Greater than 15") then "Valid Exception" else if ([Lost Reason] = "Objected" and [#"CAB Time Taken Grouped"] = "Less than 15") then "In CAB" else if ([Lost Reason] = "Cancelled" and [#"CAB Time Taken Grouped"] = "Greater than 15") then "Excluded" else if ([Lost Reason] = "Cancelled" and [#"CAB Time Taken Grouped"] = "Less than 15") then "Excluded" else if ([Lost Reason] = "Rejected" and [#"CAB Time Taken Grouped"] = "Greater than 15") then "Out of CAB" else if ([Lost Reason] = "Rejected" and [#"CAB Time Taken Grouped"] = "Less than 15") then "In CAB" else if ([Lost Reason] = "Not in AFMS" and [#"CAB Time Taken Grouped"] = "Greater than 15") then "Out of CAB" else if ([Lost Reason] = "Not in AFMS" and [#"CAB Time Taken Grouped"] = "Less than 15") then "In CAB" else if ([Lost Reason] = null and [#"CAB Time Taken Grouped"] = "Greater than 15") then "Out of CAB" else "In CAB")),
+			///Added CAB columns to show how delays in Go live impacts CAB 
+			
+	#"Added Column Not In AFMS Potential Reasons" = Table.AddColumn(#"Added Column CAB Status", "Not In AFMS Potential Reasons", each if [Lost Reason] = "Cancelled" then "Cancelled" else if [Lost Reason] = "Objected" then "Objected" else if [Lost Reason] = "Rejected" then "Rejected" else if [#"Supply Number (MPxN)"] = null then "No MPxN on Contract" else if [#"Supply Number (MPxN)"] = "" then "No MPxN on Contract" else if [Last Modified By] = "Lewis Kear" then "Close Date is Incorrect" else if [Last Modified By] = "Hannah Johnson" then "Close Date is Incorrect" else if [Last Modified By] = "Michelle Ferrier" then "Close Date is Incorrect" else if [Status Name] <> null then "AFMS Status: Loss Confirmed" else "No Registration")
+			///Added a column to suggest the potential reasons behind the 'Not in AFMS' reason
+in
+    #"Added Column Not In AFMS Potential Reasons"
